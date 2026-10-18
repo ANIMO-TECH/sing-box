@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -36,6 +36,17 @@ jobs:
             -o sing-box-amd64 ./cmd/sing-box
           ./sing-box-amd64 version
           echo "IMAGE=ghcr.io/animo-tech/sing-box:proxy-auth-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+      - name: Publish immutable candidate binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="proxy-auth-${GITHUB_SHA::8}"
+          sha256sum sing-box-amd64 > sing-box-amd64.sha256
+          gh release create "$TAG" sing-box-amd64 sing-box-amd64.sha256 \
+            --prerelease --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Immutable Linux amd64 candidate with Trojan external authentication."
       - name: Login to organization registry
         uses: docker/login-action@v3
         with:
