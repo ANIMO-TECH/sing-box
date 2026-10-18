@@ -4,9 +4,11 @@ import (
 	"context"
 	"net"
 	"os"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/authenticator"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
@@ -29,12 +31,18 @@ func RegisterInbound(registry *inbound.Registry) {
 
 var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
 
+type authenticatedUser struct {
+	index int
+	email string
+}
+
 type Inbound struct {
 	inbound.Adapter
+	externalAuth             *authenticator.HTTP
 	router                   adapter.ConnectionRouterEx
 	logger                   log.ContextLogger
 	listener                 *listener.Listener
-	service                  *trojan.Service[int]
+	service                  *trojan.Service[authenticatedUser]
 	users                    []option.TrojanUser
 	tlsConfig                tls.ServerConfig
 	fallbackAddr             M.Socksaddr
@@ -48,7 +56,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Adapter: inbound.NewAdapter(C.TypeTrojan, tag),
 		router:  router,
 		logger:  logger,
-		users:   options.Users,
 	}
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServerWithOptions(tls.ServerOptions{
@@ -90,14 +97,27 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 		fallbackHandler = adapter.NewUpstreamContextHandler(inbound.fallbackConnection, nil)
 	}
-	service := trojan.NewService[int](adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
-	err := service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.TrojanUser) int {
-		return index
-	}), common.Map(options.Users, func(it option.TrojanUser) string {
-		return it.Password
-	}))
+	service := trojan.NewService[authenticatedUser](adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
+	inbound.users = options.Users
+	err := service.UpdateUsers(common.MapIndexed(options.Users, func(index int, it option.TrojanUser) authenticatedUser {
+		return authenticatedUser{index: index}
+	}), common.Map(options.Users, func(it option.TrojanUser) string { return it.Password }))
 	if err != nil {
 		return nil, err
+	}
+	if options.HTTPAuth != nil {
+		if len(options.Users) > 0 {
+			return nil, E.New("http_auth and static users cannot be combined")
+		}
+		external, authErr := authenticator.NewHTTP(options.HTTPAuth.URL, options.HTTPAuth.ServiceToken, time.Duration(options.HTTPAuth.Timeout))
+		if authErr != nil {
+			return nil, authErr
+		}
+		service.SetAuthenticator(func(ctx context.Context, digest string, source M.Socksaddr) (authenticatedUser, error) {
+			email, err := external.Authenticate(ctx, digest)
+			return authenticatedUser{index: -1, email: email}, err
+		})
+		inbound.externalAuth = external
 	}
 	if options.Transport != nil {
 		inbound.transport, err = v2ray.NewServerTransport(ctx, logger, common.PtrValueOrDefault(options.Transport), inbound.tlsConfig, (*inboundTransportHandler)(inbound))
@@ -123,6 +143,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
+	}
+	if h.externalAuth != nil {
+		scope.Add(func() error { h.externalAuth.Close(); return nil })
 	}
 	if h.tlsConfig != nil {
 		err := h.tlsConfig.Start()
@@ -188,36 +211,44 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
-	if !loaded {
+	identity, loaded := auth.UserFromContext[authenticatedUser](ctx)
+	if !loaded || (identity.email == "" && (identity.index < 0 || identity.index >= len(h.users))) {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
+	user := identity.email
+	if user != "" {
 		metadata.User = user
+	} else {
+		metadata.User = h.users[identity.index].Name
+		user = metadata.User
+		if user == "" {
+			user = F.ToString(identity.index)
+		}
 	}
-	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
+	h.logger.InfoContext(ctx, "[", user, "] inbound connection from ", metadata.Source, " to ", metadata.Destination)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
 func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
-	if !loaded {
+	identity, loaded := auth.UserFromContext[authenticatedUser](ctx)
+	if !loaded || (identity.email == "" && (identity.index < 0 || identity.index >= len(h.users))) {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
+	user := identity.email
+	if user != "" {
 		metadata.User = user
+	} else {
+		metadata.User = h.users[identity.index].Name
+		user = metadata.User
+		if user == "" {
+			user = F.ToString(identity.index)
+		}
 	}
-	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
+	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source, " to ", metadata.Destination)
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 

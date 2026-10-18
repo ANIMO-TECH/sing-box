@@ -1,8 +1,11 @@
 package option
 
+import "github.com/sagernet/sing/common/json/badoption"
+
 type TrojanInboundOptions struct {
 	ListenOptions
-	Users []TrojanUser `json:"users,omitempty"`
+	HTTPAuth *TrojanHTTPAuthOptions `json:"http_auth,omitempty"`
+	Users    []TrojanUser           `json:"users,omitempty"`
 	InboundTLSOptionsContainer
 	Fallback        *ServerOptions            `json:"fallback,omitempty"`
 	FallbackForALPN map[string]*ServerOptions `json:"fallback_for_alpn,omitempty"`
@@ -23,4 +26,11 @@ type TrojanOutboundOptions struct {
 	OutboundTLSOptionsContainer
 	Multiplex *OutboundMultiplexOptions `json:"multiplex,omitempty"`
 	Transport *V2RayTransportOptions    `json:"transport,omitempty"`
+}
+
+// TrojanHTTPAuthOptions selects external authentication instead of static users.
+type TrojanHTTPAuthOptions struct {
+	URL          string             `json:"url"`
+	ServiceToken string             `json:"service_token"`
+	Timeout      badoption.Duration `json:"timeout,omitempty"`
 }

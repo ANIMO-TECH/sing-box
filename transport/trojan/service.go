@@ -3,6 +3,7 @@ package trojan
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
 
 	"github.com/sagernet/sing/common/auth"
@@ -20,7 +21,10 @@ type Handler interface {
 	N.UDPConnectionHandlerEx
 }
 
+type AuthenticateFunc[K comparable] func(ctx context.Context, digest string, source M.Socksaddr) (K, error)
+
 type Service[K comparable] struct {
+	authenticate    AuthenticateFunc[K]
 	users           map[K][56]byte
 	keys            map[[56]byte]K
 	handler         Handler
@@ -36,6 +40,11 @@ func NewService[K comparable](handler Handler, fallbackHandler N.TCPConnectionHa
 		fallbackHandler: fallbackHandler,
 		logger:          logger,
 	}
+}
+
+// SetAuthenticator overrides local credential validation. Configure it before accepting connections.
+func (s *Service[K]) SetAuthenticator(authenticate AuthenticateFunc[K]) {
+	s.authenticate = authenticate
 }
 
 var ErrUserExists = E.New("user already exists")
@@ -61,14 +70,20 @@ func (s *Service[K]) UpdateUsers(userList []K, passwordList []string) error {
 
 func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
 	var key [KeyLength]byte
-	n, err := conn.Read(key[:])
+	n, err := io.ReadFull(conn, key[:])
 	if err != nil {
 		return err
 	} else if n != KeyLength {
 		return s.fallback(ctx, conn, source, key[:n], E.New("bad request size"), onClose)
 	}
 
-	if user, loaded := s.keys[key]; loaded {
+	if s.authenticate != nil {
+		user, err := s.authenticate(ctx, string(key[:]), source)
+		if err != nil {
+			return E.Cause(err, "authenticate user")
+		}
+		ctx = auth.ContextWithUser(ctx, user)
+	} else if user, loaded := s.keys[key]; loaded {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return s.fallback(ctx, conn, source, key[:], E.New("bad request"), onClose)
