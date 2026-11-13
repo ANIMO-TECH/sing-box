@@ -16,11 +16,12 @@ import (
 
 type Hysteria2InboundOptions struct {
 	ListenOptions
-	UpMbps                int             `json:"up_mbps,omitempty"`
-	DownMbps              int             `json:"down_mbps,omitempty"`
-	Obfs                  *Hysteria2Obfs  `json:"obfs,omitempty"`
-	Users                 []Hysteria2User `json:"users,omitempty"`
-	IgnoreClientBandwidth bool            `json:"ignore_client_bandwidth,omitempty"`
+	UpMbps                int                       `json:"up_mbps,omitempty"`
+	DownMbps              int                       `json:"down_mbps,omitempty"`
+	Obfs                  *Hysteria2Obfs            `json:"obfs,omitempty"`
+	HTTPAuth              *Hysteria2HTTPAuthOptions `json:"http_auth,omitempty"`
+	Users                 []Hysteria2User           `json:"users,omitempty"`
+	IgnoreClientBandwidth bool                      `json:"ignore_client_bandwidth,omitempty"`
 	InboundTLSOptionsContainer
 	QUICOptions
 	Masquerade  *Hysteria2Masquerade   `json:"masquerade,omitempty"`
@@ -28,6 +29,9 @@ type Hysteria2InboundOptions struct {
 	BrutalDebug bool                   `json:"brutal_debug,omitempty"`
 	Realm       *Hysteria2InboundRealm `json:"realm,omitempty"`
 }
+
+// Hysteria2 uses the same backend contract and options as Trojan.
+type Hysteria2HTTPAuthOptions = TrojanHTTPAuthOptions
 
 type Hysteria2Realm struct {
 	ServerURL   string                     `json:"server_url"`

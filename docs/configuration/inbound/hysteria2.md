@@ -72,6 +72,35 @@ See [Listen Fields](/configuration/shared/listen/) for details.
 
 ### Fields
 
+#### http_auth (Advoo extension)
+
+Use the same external token verification endpoint as Trojan, instead of static
+`users`. The two options are mutually exclusive:
+
+```json
+{
+  "http_auth": {
+    "url": "http://dotai-backend.prod.api.dotai.internal/dotai/internal/proxy/token/query",
+    "service_token": "<injected internal service credential>",
+    "timeout": "3s"
+  }
+}
+```
+
+Clients set their proxy token as the Hysteria2 password. The server derives its
+SHA-224 digest and reuses the Trojan backend contract: POST `{"digest":"<56 lowercase hex>"}`
+with `X-Gateway-Service-Token`. Only HTTP 200 with
+`{"code":0,"result":{"valid":true,"email":"user@example.com"}}` is accepted.
+The returned email is the routing/logging user. Plaintext credentials are never
+sent to the backend or logged.
+
+Authentication is checked during the QUIC handshake and again for every new TCP
+stream or UDP session, including those on an already authenticated QUIC connection.
+Responses are not cached. Denials, malformed responses, redirects, timeouts and
+backend errors fail closed with no static-user fallback. Existing streams/sessions
+are not terminated when a token is revoked, matching the Trojan connection semantics.
+Default timeout is 3 seconds, with a maximum of 30 seconds.
+
 #### up_mbps, down_mbps
 
 Max bandwidth, in Mbps.

@@ -71,6 +71,30 @@ icon: material/alert-decagram
 
 ### 字段
 
+#### http_auth（Advoo 扩展）
+
+使用与 Trojan 相同的后端接口验证代理 token，与静态 `users` 配置互斥：
+
+```json
+{
+  "http_auth": {
+    "url": "http://dotai-backend.prod.api.dotai.internal/dotai/internal/proxy/token/query",
+    "service_token": "<内部服务凭据>",
+    "timeout": "3s"
+  }
+}
+```
+
+客户端将代理 token 填入 Hysteria2 的 `password`。服务端计算 SHA-224 摘要，
+向后端 POST `{"digest":"<56 位小写十六进制>"}`，并携带 `X-Gateway-Service-Token`。
+仅接受 HTTP 200 且 `code=0`、`result.valid=true` 和合法的 `result.email`。
+返回的邮箱作为路由和日志中的用户标识；不向后端发送 token 明文，也不记录认证凭据。
+
+QUIC 握手以及其上的每个新 TCP 流、UDP 会话均校验，不缓存结果。
+token 被撤销、后端不可用、超时或响应异常时拒绝访问，不回退到静态用户。
+已有 TCP 流、UDP 会话不会被主动断开，与 Trojan 的现有连接语义一致。
+默认超时为 3 秒，最大为 30 秒。
+
 #### up_mbps, down_mbps
 
 支持的速率，默认不限制。

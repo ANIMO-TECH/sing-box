@@ -23,7 +23,7 @@ jobs:
         with:
           go-version: 1.26.8
       - name: Verify external authentication and static compatibility
-        run: go test -race -timeout 90s ./common/authenticator ./transport/trojan ./protocol/trojan
+        run: go test -tags with_quic -race -timeout 120s ./common/authenticator ./transport/trojan ./protocol/trojan ./transport/hysteria2 ./protocol/hysteria2
       - name: Build binary with upstream container feature flags
         shell: bash
         run: |
@@ -46,7 +46,7 @@ jobs:
           sha256sum sing-box-amd64 > sing-box-amd64.sha256
           gh release create "$TAG" sing-box-amd64 sing-box-amd64.sha256 \
             --prerelease --target "$GITHUB_SHA" --title "$TAG" \
-            --notes "Immutable Linux amd64 candidate with Trojan external authentication."
+            --notes "Immutable Linux amd64 candidate with Trojan and Hysteria2 external authentication."
       - name: Login to organization registry
         uses: docker/login-action@v3
         with:

@@ -2,6 +2,8 @@ package hysteria2
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -12,15 +14,16 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/authenticator"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/hysteria2"
 	qtls "github.com/sagernet/sing-quic"
 	"github.com/sagernet/sing-quic/hysteria"
-	"github.com/sagernet/sing-quic/hysteria2"
 	"github.com/sagernet/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
@@ -41,11 +44,21 @@ type Inbound struct {
 	logger       log.ContextLogger
 	listener     *listener.Listener
 	tlsConfig    tls.ServerConfig
-	service      *hysteria2.Service[int]
+	service      *hysteria2.Service[authenticatedUser]
+	externalAuth *authenticator.HTTP
 	userNameList []string
 }
 
+type authenticatedUser struct {
+	index  int
+	email  string
+	digest string
+}
+
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2InboundOptions) (adapter.Inbound, error) {
+	if options.HTTPAuth != nil && len(options.Users) > 0 {
+		return nil, E.New("http_auth and static users cannot be combined")
+	}
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
@@ -180,7 +193,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			}
 		}
 	}
-	hysteriaService, err := hysteria2.NewService[int](hysteria2.ServiceOptions{
+	hysteriaService, err := hysteria2.NewService[authenticatedUser](hysteria2.ServiceOptions{
 		Context:            ctx,
 		Logger:             logger,
 		BrutalDebug:        options.BrutalDebug,
@@ -210,22 +223,66 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
-	userList := make([]int, 0, len(options.Users))
+	userList := make([]authenticatedUser, 0, len(options.Users))
 	userNameList := make([]string, 0, len(options.Users))
 	userPasswordList := make([]string, 0, len(options.Users))
 	for index, user := range options.Users {
-		userList = append(userList, index)
+		userList = append(userList, authenticatedUser{index: index})
 		userNameList = append(userNameList, user.Name)
 		userPasswordList = append(userPasswordList, user.Password)
 	}
 	hysteriaService.UpdateUsers(userList, userPasswordList)
+	if options.HTTPAuth != nil {
+		external, authErr := authenticator.NewHTTP(options.HTTPAuth.URL, options.HTTPAuth.ServiceToken, time.Duration(options.HTTPAuth.Timeout))
+		if authErr != nil {
+			return nil, authErr
+		}
+		inbound.externalAuth = external
+		hysteriaService.SetAuthenticator(inbound.authenticate)
+	}
 	inbound.service = hysteriaService
 	inbound.userNameList = userNameList
 	return inbound, nil
 }
 
+func (h *Inbound) authenticate(ctx context.Context, password string, _ M.Socksaddr) (authenticatedUser, error) {
+	if password == "" || len(password) > 4096 {
+		return authenticatedUser{}, E.New("invalid authentication credential")
+	}
+	// The existing Java endpoint accepts the same SHA-224 digest as Trojan.
+	digestBytes := sha256.Sum224([]byte(password))
+	digest := hex.EncodeToString(digestBytes[:])
+	email, err := h.externalAuth.Authenticate(ctx, digest)
+	if err != nil {
+		return authenticatedUser{}, err
+	}
+	return authenticatedUser{index: -1, email: email, digest: digest}, nil
+}
+
+func (h *Inbound) authenticatedUserName(ctx context.Context) (string, error) {
+	user, loaded := auth.UserFromContext[authenticatedUser](ctx)
+	if !loaded {
+		return "", E.New("missing authenticated user")
+	}
+	if h.externalAuth != nil {
+		// QUIC multiplexes streams: revalidate each new TCP stream/UDP session,
+		// even when its parent QUIC connection was authenticated previously.
+		return h.externalAuth.Authenticate(ctx, user.digest)
+	}
+	if user.index < 0 || user.index >= len(h.userNameList) {
+		return "", E.New("invalid authenticated user")
+	}
+	return h.userNameList[user.index], nil
+}
+
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	ctx = log.ContextWithNewID(ctx)
+	userName, err := h.authenticatedUserName(ctx)
+	if err != nil {
+		N.CloseOnHandshakeFailure(conn, onClose, err)
+		h.logger.ErrorContext(ctx, "authentication denied")
+		return
+	}
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
@@ -236,8 +293,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
@@ -248,6 +304,12 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 
 func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	ctx = log.ContextWithNewID(ctx)
+	userName, err := h.authenticatedUserName(ctx)
+	if err != nil {
+		N.CloseOnHandshakeFailure(conn, onClose, err)
+		h.logger.ErrorContext(ctx, "authentication denied")
+		return
+	}
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
@@ -258,8 +320,7 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
@@ -271,6 +332,9 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
+	}
+	if h.externalAuth != nil {
+		scope.Add(func() error { h.externalAuth.Close(); return nil })
 	}
 	if h.tlsConfig != nil {
 		err := h.tlsConfig.Start()

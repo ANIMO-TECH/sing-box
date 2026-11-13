@@ -1,0 +1,1 @@
+Server transport copied from github.com/sagernet/sing-quic/hysteria2 at v0.7.2-0.20261002084117-75c3ac4fa12b (GPL-3.0-or-later). Copyright (C) 2022 nekohasekai. The client, realm, congestion control and QUIC implementation remain upstream dependencies. Local changes provide an external authenticator callback and synchronize authenticated session identity.
